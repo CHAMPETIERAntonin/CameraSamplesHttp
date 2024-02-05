@@ -1,18 +1,30 @@
 package fr.antoninchampetier.camerasampleshttp;
 
 import android.app.Activity;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
+import android.graphics.Matrix;
+import android.util.Log;
 import android.view.View;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.exifinterface.media.ExifInterface;
 
+import com.otaliastudios.cameraview.BitmapCallback;
 import com.otaliastudios.cameraview.CameraListener;
+import com.otaliastudios.cameraview.CameraUtils;
 import com.otaliastudios.cameraview.CameraView;
 import com.otaliastudios.cameraview.PictureResult;
+import com.otaliastudios.cameraview.internal.ExifHelper;
+import com.otaliastudios.cameraview.internal.WorkerHandler;
 import com.otaliastudios.cameraview.size.SizeSelector;
 import com.otaliastudios.cameraview.size.SizeSelectors;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 
 public class CameraCapturer
 {
@@ -26,6 +38,7 @@ public class CameraCapturer
 	}
 
 
+	MultiOutputStream multiOutputStream = new MultiOutputStream();
 
 
 
@@ -58,9 +71,27 @@ public class CameraCapturer
 				super.onPictureTaken(result);
 				synchronized (CameraCapturer.this)
 				{
-					CameraCapturer.this.data = result.getData();
-					CameraCapturer.this.isTakingPicture = false;
-					CameraCapturer.this.notifyAll();
+					WorkerHandler.execute(
+							new Runnable()
+							{
+								@Override
+								public void run()
+								{
+
+									Bitmap bitmap = CameraCapturer.decodeBitmap(result.getData(), Integer.MAX_VALUE, Integer.MAX_VALUE, new BitmapFactory.Options(), result.getRotation());
+									if (bitmap != null)
+										bitmap.compress(Bitmap.CompressFormat.JPEG, 90, CameraCapturer.this.multiOutputStream);
+
+									CameraCapturer.this.multiOutputStream.clear();
+									CameraCapturer.this.isTakingPicture = false;
+									synchronized (CameraCapturer.this)
+									{
+										CameraCapturer.this.notifyAll();
+									}
+
+								}
+							}
+					);
 				}
 			}
 		});
@@ -81,6 +112,9 @@ public class CameraCapturer
 				response.setHeader("Hostname", "phone");
 				response.setHeader("Content-Type", "image/jpeg");
 
+				response.generate();
+				CameraCapturer.this.multiOutputStream.addStream(response.getStream());
+
 				synchronized (CameraCapturer.this)
 				{
 
@@ -93,15 +127,7 @@ public class CameraCapturer
 					}
 				}
 
-				char[] chars = new char[CameraCapturer.this.data.length];
-
-				for(int i=0; i<CameraCapturer.this.data.length; i++)
-					chars[i] = (char)CameraCapturer.this.data[i];
-
-				response.setBody(chars);
-//				out.write(httpVersion + " 200 OK\n");
-//				out.write("\n");
-//				out.write("Bien le bjr");
+				//response.setBody(CameraCapturer.this.data);
 			}
 		});
 
@@ -145,13 +171,6 @@ public class CameraCapturer
 					response.setReason("Unknown");
 					response.setHeader("Hostname", "phone");
 				}
-
-
-
-
-
-
-
 			}
 		});
 	}
@@ -169,5 +188,118 @@ public class CameraCapturer
 	public void setInterval(float interval)
 	{
 		this.interval = interval;
+	}
+
+
+
+
+	// Ignores flipping, but it should be super rare.
+	@SuppressWarnings("TryFinallyCanBeTryWithResources")
+	@Nullable
+	private static Bitmap decodeBitmap(@NonNull byte[] source,
+									   int maxWidth,
+									   int maxHeight,
+									   @NonNull BitmapFactory.Options options,
+									   int rotation)
+	{
+		if (maxWidth <= 0) maxWidth = Integer.MAX_VALUE;
+		if (maxHeight <= 0) maxHeight = Integer.MAX_VALUE;
+		int orientation;
+		boolean flip;
+		if (rotation == -1)
+		{
+			InputStream stream = null;
+			try
+			{
+				// http://sylvana.net/jpegcrop/exif_orientation.html
+				stream = new ByteArrayInputStream(source);
+				ExifInterface exif = new ExifInterface(stream);
+				int exifOrientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+						ExifInterface.ORIENTATION_NORMAL);
+				orientation = ExifHelper.getOrientation(exifOrientation);
+				flip = exifOrientation == ExifInterface.ORIENTATION_FLIP_HORIZONTAL ||
+						exifOrientation == ExifInterface.ORIENTATION_FLIP_VERTICAL ||
+						exifOrientation == ExifInterface.ORIENTATION_TRANSPOSE ||
+						exifOrientation == ExifInterface.ORIENTATION_TRANSVERSE;
+				Log.i("decodeBitmap:", "got orientation from EXIF. " + orientation);
+			}
+			catch (IOException e)
+			{
+				Log.e("decodeBitmap:", "could not get orientation from EXIF.", e);
+				orientation = 0;
+				flip = false;
+			}
+			finally
+			{
+				if (stream != null)
+				{
+					try
+					{
+						stream.close();
+					} catch (Exception ignored) { }
+				}
+			}
+		}
+		else
+		{
+			orientation = rotation;
+			flip = false;
+			Log.i("decodeBitmap:", "got orientation from constructor. " +  orientation);
+		}
+
+		Bitmap bitmap;
+		try
+		{
+			if (maxWidth < Integer.MAX_VALUE || maxHeight < Integer.MAX_VALUE) {
+				options.inJustDecodeBounds = true;
+				BitmapFactory.decodeByteArray(source, 0, source.length, options);
+
+				int outHeight = options.outHeight;
+				int outWidth = options.outWidth;
+				if (orientation % 180 != 0) {
+					//noinspection SuspiciousNameCombination
+					outHeight = options.outWidth;
+					//noinspection SuspiciousNameCombination
+					outWidth = options.outHeight;
+				}
+
+				options.inSampleSize = computeSampleSize(outWidth, outHeight, maxWidth, maxHeight);
+				options.inJustDecodeBounds = false;
+				bitmap = BitmapFactory.decodeByteArray(source, 0, source.length, options);
+			}
+			else
+			{
+				bitmap = BitmapFactory.decodeByteArray(source, 0, source.length);
+			}
+
+			if (orientation != 0 || flip)
+			{
+				Matrix matrix = new Matrix();
+				matrix.setRotate(orientation);
+				Bitmap temp = bitmap;
+				bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(),
+						bitmap.getHeight(), matrix, true);
+				temp.recycle();
+			}
+		}
+		catch (OutOfMemoryError e)
+		{
+			bitmap = null;
+		}
+		return bitmap;
+	}
+
+	private static int computeSampleSize(int width, int height, int maxWidth, int maxHeight) {
+		// https://developer.android.com/topic/performance/graphics/load-bitmap.html
+		int inSampleSize = 1;
+		if (height > maxHeight || width > maxWidth)
+		{
+			while ((height / inSampleSize) >= maxHeight
+					|| (width / inSampleSize) >= maxWidth)
+			{
+				inSampleSize *= 2;
+			}
+		}
+		return inSampleSize;
 	}
 }

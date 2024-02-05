@@ -6,9 +6,11 @@ import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -86,7 +88,7 @@ public class SimpleHTTPServer
 				BufferedWriter out = new BufferedWriter(new OutputStreamWriter(this.socketClient.getOutputStream()));
 
 				HTTPRequest request = new HTTPRequest(in);
-				HTTPResponse response = new HTTPResponse();
+				HTTPResponse response = new HTTPResponse(this.socketClient.getOutputStream());
 
 				response.setHttpVersion(request.getHttpVersion());
 
@@ -100,7 +102,7 @@ public class SimpleHTTPServer
 					response.setStatusCode(404);
 					response.setReason("Unknown");
 				}
-				response.generate(out);
+				response.generate();
 				out.flush();
 				this.socketClient.close();
 			}
@@ -124,12 +126,18 @@ public class SimpleHTTPServer
 
 	public static class HTTPResponse
 	{
+		private OutputStream stream;
 		private String httpVersion;
 		private int statusCode;
 		private String reason;
 
 		private HashMap<String, String> headers = new HashMap<>();
-		private char[] body;
+		private byte[] body;
+
+		public HTTPResponse(OutputStream stream)
+		{
+			this.stream = stream;
+		}
 
 		public void setStatusCode(int statusCode)
 		{
@@ -151,32 +159,36 @@ public class SimpleHTTPServer
 			this.headers.put(name, value);
 		}
 
-		public void setBody(char[] body)
+		public void setBody(byte[] body)
 		{
 			this.body = body;
 		}
 
-
-		public void generate(BufferedWriter out) throws IOException
+		public OutputStream getStream()
 		{
-			out.write(this.httpVersion);
-			out.write(' ');
-			out.write(String.valueOf(this.statusCode));
-			out.write(' ');
-			out.write(this.reason);
-			out.write("\r\n");
+			return this.stream;
+		}
+
+		public void generate() throws IOException
+		{
+			this.stream.write(this.httpVersion.getBytes(StandardCharsets.US_ASCII));
+			this.stream.write(' ');
+			this.stream.write(String.valueOf(this.statusCode).getBytes(StandardCharsets.US_ASCII));
+			this.stream.write(' ');
+			this.stream.write(this.reason.getBytes(StandardCharsets.US_ASCII));
+			this.stream.write(new byte[]{13,10});
 
 			for (Map.Entry<String, String> entry : this.headers.entrySet())
 			{
-				out.write(entry.getKey());
-				out.write(": ");
-				out.write(entry.getValue());
-				out.write("\r\n");
+				this.stream.write(entry.getKey().getBytes(StandardCharsets.US_ASCII));
+				this.stream.write(": ".getBytes(StandardCharsets.US_ASCII));
+				this.stream.write(entry.getValue().getBytes(StandardCharsets.US_ASCII));
+				this.stream.write("\r\n".getBytes(StandardCharsets.US_ASCII));
 			}
-			out.write("\r\n");
+			this.stream.write(new byte[]{13,10});
 
 			if(this.body != null)
-				out.write(this.body);
+				this.stream.write(this.body);
 		}
 
 
@@ -194,6 +206,8 @@ public class SimpleHTTPServer
 		{
 			METHOD,
 			URL,
+			URL_PARAM_NAME,
+			URL_PARAM_VALUE,
 			VERSION,
 			HEADER_NAME,
 			HEADER_VALUE,
@@ -206,8 +220,9 @@ public class SimpleHTTPServer
 		private String url;
 		private String httpVersion;
 
-		private HashMap<String, String> headers = new HashMap<>();
-		private ArrayList<Character> body = new ArrayList<>();
+		private final HashMap<String, String> headers = new HashMap<>();
+		private final HashMap<String, String> parameters = new HashMap<>();
+		private final ArrayList<Character> body = new ArrayList<>();
 
 		public HTTPMethod getMethod()
 		{
@@ -228,6 +243,10 @@ public class SimpleHTTPServer
 		{
 			return headers;
 		}
+		public HashMap<String, String> getParameters()
+		{
+			return this.parameters;
+		}
 
 		public ArrayList<Character> getBody()
 		{
@@ -238,7 +257,7 @@ public class SimpleHTTPServer
 			ReadState state = ReadState.METHOD;
 			int character;
 			StringBuilder current = new StringBuilder();
-			String headerName = null;
+			String paramName = null;
 
 			int contentSize = 0;
 
@@ -272,6 +291,46 @@ public class SimpleHTTPServer
 
 							current.setLength(0);
 						}
+						else if (c == '?')
+						{
+							state = ReadState.URL_PARAM_NAME;
+							this.url = current.toString().trim();
+
+							current.setLength(0);
+						}
+						else
+							current.append(c);
+						break;
+					case URL_PARAM_NAME:
+						if(c == ' ')
+						{
+							state = ReadState.VERSION;
+						}
+						else if (c == '=')
+						{
+							state = ReadState.URL_PARAM_VALUE;
+							paramName = current.toString().trim();
+
+							current.setLength(0);
+						}
+						else
+							current.append(c);
+						break;
+					case URL_PARAM_VALUE:
+						if(c == ' ')
+						{
+							state = ReadState.VERSION;
+							this.parameters.put(paramName, current.toString().trim());
+
+							current.setLength(0);
+						}
+						else if (c == '&')
+						{
+							state = ReadState.URL_PARAM_NAME;
+							this.parameters.put(paramName, current.toString().trim());
+
+							current.setLength(0);
+						}
 						else
 							current.append(c);
 						break;
@@ -290,16 +349,16 @@ public class SimpleHTTPServer
 						if(c == ':')
 						{
 							state = ReadState.HEADER_VALUE;
-							headerName = current.toString().trim();
+							paramName = current.toString().trim();
 
 							current.setLength(0);
 						}
 						else if (c == '\n')
 						{
-							headerName = this.headers.get("Content-Length");
-							if(headerName == null)
+							paramName = this.headers.get("Content-Length");
+							if(paramName == null)
 								return;
-							contentSize =  Integer.parseInt(headerName);
+							contentSize =  Integer.parseInt(paramName);
 							if(contentSize == 0)
 								return;
 
@@ -312,7 +371,7 @@ public class SimpleHTTPServer
 						if(c == '\n')
 						{
 							state = ReadState.HEADER_NAME;
-							this.headers.put(headerName, current.toString().trim());
+							this.headers.put(paramName, current.toString().trim());
 
 							current.setLength(0);
 						}
