@@ -25,6 +25,7 @@ import com.otaliastudios.cameraview.size.SizeSelectors;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 public class CameraCapturer
 {
@@ -46,6 +47,8 @@ public class CameraCapturer
 	CameraView cameraView;
 	byte[] data;
 	boolean isTakingPicture;
+
+	Quality quality = Quality.Low;
 
 
 	public void setCameraView(CameraView cameraView)
@@ -173,6 +176,66 @@ public class CameraCapturer
 				}
 			}
 		});
+
+
+		this.simpleHTTPServer.registerHandler("/quality", new SimpleHTTPServer.IHTTPHandler()
+		{
+			@Override
+			public void Handle(SimpleHTTPServer.HTTPRequest request, SimpleHTTPServer.HTTPResponse response) throws Exception
+			{
+				switch (request.getMethod())
+				{
+					case GET:
+						response.setStatusCode(200);
+						response.setReason("Ok");
+						response.setHeader("Hostname", "phone");
+						response.setHeader("Content-Type", "text/plain");
+
+						switch (CameraCapturer.this.quality)
+						{
+							case Low:
+								response.setBody("Low".getBytes(StandardCharsets.US_ASCII));
+								break;
+							case High:
+								response.setBody("High".getBytes(StandardCharsets.US_ASCII));
+								break;
+						}
+						break;
+
+					case POST:
+						String value = request.getParameters().get("value");
+						boolean success = false;
+						if(value != null)
+						{
+							if(value.equals("Low"))
+							{
+								CameraCapturer.this.quality = Quality.Low;
+								success = true;
+							}
+							else if(value.equals("High"))
+							{
+								CameraCapturer.this.quality = Quality.High;
+								success = true;
+
+							}
+						}
+
+						if(success)
+						{
+							response.setStatusCode(200);
+							response.setReason("Ok");
+							response.setHeader("Hostname", "phone");
+						}
+						else
+						{
+							response.setStatusCode(400);
+							response.setReason("Bad Request, Unknown Parameter");
+							response.setHeader("Hostname", "phone");
+						}
+						break;
+				}
+			}
+		});
 	}
 
 
@@ -180,7 +243,15 @@ public class CameraCapturer
 	public void takePicture()
 	{
 		this.isTakingPicture = true;
-		this.cameraView.takePictureSnapshot();
+		switch (this.quality)
+		{
+			case Low:
+				this.cameraView.takePictureSnapshot();
+				break;
+			case High:
+				this.cameraView.takePicture();
+				break;
+		}
 	}
 
 	float interval = 5;
@@ -301,5 +372,14 @@ public class CameraCapturer
 			}
 		}
 		return inSampleSize;
+	}
+
+
+
+
+	private enum Quality
+	{
+		High,
+		Low
 	}
 }
